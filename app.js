@@ -11,53 +11,33 @@ const client = new Client({
     }
 });
 
-// --- IGNORE LOGIC ---
-const isIgnored = (name, id) => {
-    try {
-        if (!fs.existsSync('ignore.txt')) return false;
-        
-        // Read ignore.txt and clean the data
-        const ignoredList = fs.readFileSync('ignore.txt', 'utf8')
-            .split('\n')
-            .map(line => line.trim())
-            .filter(line => line.length > 0);
-
-        const cleanId = id.split('@')[0]; // Gets just the number from 12345@c.us
-
-        // Check if Name or Number matches anything in ignore.txt
-        return ignoredList.some(item => 
-            (name && name.toLowerCase() === item.toLowerCase()) || 
-            (cleanId === item)
-        );
-    } catch (err) {
-        console.error("Error reading ignore.txt:", err);
-        return false;
-    }
-};
-
 client.on('qr', (qr) => {
     console.log('--- SCAN THE QR CODE BELOW ---');
     qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
-    console.log('✅ SYSTEM ONLINE: Monitoring with Ignore List active...');
+    console.log('✅ SYSTEM ONLINE: Saving Data with "Sent by Me" Folders...');
 });
 
-const cleanFolderName = (name) => name.replace(/[<>:"/\\|?*]/g, "").trim();
+// Helper to clean folder names
+const cleanName = (name) => name.replace(/[<>:"/\\|?*]/g, "").trim();
 
+// Enhanced Folder Logic
 const getPaths = (chatName, participantName, isGroup) => {
-    const chatFolder = cleanFolderName(chatName);
+    const chatFolder = cleanName(chatName);
     let baseDir = path.join(__dirname, 'Backups', chatFolder);
 
+    // If Group, create a subfolder for the sender (or "Sent by Me")
     if (isGroup) {
-        const subFolder = cleanFolderName(participantName);
+        const subFolder = cleanName(participantName);
         baseDir = path.join(baseDir, subFolder);
     }
 
     const paths = {
         messages: path.join(baseDir, 'messages'),
         media: path.join(baseDir, 'media'),
+        calls: path.join(baseDir, 'calls')
     };
 
     Object.values(paths).forEach(dir => {
@@ -67,32 +47,25 @@ const getPaths = (chatName, participantName, isGroup) => {
     return paths;
 };
 
+// Capture ALL Messages (Sent & Received)
 client.on('message_create', async (msg) => {
     try {
         const chat = await msg.getChat();
         const contact = await msg.getContact();
         
-        const chatName = chat.name || "Unknown";
-        const chatId = chat.id._serialized;
-        const senderName = contact.name || contact.pushname || contact.number;
-        const senderId = contact.id._serialized;
-
-        // 🛑 SKIP CHECK
-        // Check if the Chat itself (Group or Person) is in the ignore list
-        if (isIgnored(chatName, chatId)) {
-            return; 
-        }
-
         let paths;
         let senderLabel;
 
         if (chat.isGroup) {
-            senderLabel = msg.fromMe ? "Sent by Me" : senderName;
-            paths = getPaths(chatName, senderLabel, true);
+            const groupName = chat.name || "Unknown Group";
+            // If message is from me, name the subfolder "Sent by Me"
+            senderLabel = msg.fromMe ? "Sent by Me" : (contact.name || contact.pushname || contact.number);
+            paths = getPaths(groupName, senderLabel, true);
         } else {
-            // For private chats, folder name is the person's name
-            const folderOwner = msg.fromMe ? (chatName) : senderName;
-            paths = getPaths(folderOwner);
+            // Private Chat logic
+            const targetId = msg.fromMe ? msg.to : msg.from;
+            const personName = contact.name || contact.number || targetId;
+            paths = getPaths(personName);
             senderLabel = msg.fromMe ? "ME" : "THEM";
         }
 
@@ -106,12 +79,14 @@ client.on('message_create', async (msg) => {
             const media = await msg.downloadMedia();
             if (media) {
                 const ext = media.mimetype.split('/')[1].split(';')[0];
-                const filename = `${Date.now()}_${cleanFolderName(senderLabel)}.${ext}`;
+                const filename = `${Date.now()}_${cleanName(senderLabel)}.${ext}`;
                 fs.writeFileSync(path.join(paths.media, filename), media.data, { encoding: 'base64' });
             }
         }
+        
+        console.log(`✅ Saved ${senderLabel} data in ${chat.name || "Chat"}`);
     } catch (err) {
-        console.error("Error processing message:", err.message);
+        console.error("Error:", err.message);
     }
 });
 
