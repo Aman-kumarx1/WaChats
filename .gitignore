@@ -1,0 +1,11 @@
+# Dependency folder
+node_modules/
+
+# PRIVATE DATA (Do not upload!)
+Backups/
+.wwebjs_auth/
+.wwebjs_cache/
+
+# System files
+.env
+*.log
