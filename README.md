@@ -27,7 +27,7 @@ A powerful, automated Node.js tool to backup your WhatsApp chats, media, and cal
 ### Installation
 1. Clone the Repository:
    
-   > git clone [https://github.com/Aman-kumarx1/WaChats.git](https://github.com/Aman-kumarx1/WaChats.git)
+   > git clone [https://github.com/Aman-kumarx1/WaChats.git]
    
    > cd WaChats
    
