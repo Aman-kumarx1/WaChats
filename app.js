@@ -1,4 +1,4 @@
-export {};
+export {}; // 🛠️ Adding this line fixes the "Redeclare" error instantly
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
