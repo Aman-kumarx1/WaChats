@@ -3,6 +3,7 @@ const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
 
+// 1. Initialize Client with Session Persistence
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -11,24 +12,31 @@ const client = new Client({
     }
 });
 
-client.on('qr', (qr) => {
-    console.log('--- SCAN THE QR CODE BELOW ---');
-    qrcode.generate(qr, { small: true });
-});
+// 2. Ignore List Logic
+const isIgnored = (name, id) => {
+    try {
+        if (!fs.existsSync('ignore.txt')) return false;
+        const ignoredList = fs.readFileSync('ignore.txt', 'utf8')
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0);
 
-client.on('ready', () => {
-    console.log('✅ SYSTEM ONLINE: Saving Data with "Sent by Me" Folders...');
-});
+        const cleanId = id.split('@')[0]; 
+        return ignoredList.some(item => 
+            (name && name.toLowerCase() === item.toLowerCase()) || (cleanId === item)
+        );
+    } catch (err) {
+        return false;
+    }
+};
 
-// Helper to clean folder names
+// 3. Folder Path Logic
 const cleanName = (name) => name.replace(/[<>:"/\\|?*]/g, "").trim();
 
-// Enhanced Folder Logic
 const getPaths = (chatName, participantName, isGroup) => {
     const chatFolder = cleanName(chatName);
     let baseDir = path.join(__dirname, 'Backups', chatFolder);
 
-    // If Group, create a subfolder for the sender (or "Sent by Me")
     if (isGroup) {
         const subFolder = cleanName(participantName);
         baseDir = path.join(baseDir, subFolder);
@@ -47,25 +55,61 @@ const getPaths = (chatName, participantName, isGroup) => {
     return paths;
 };
 
-// Capture ALL Messages (Sent & Received)
+// 4. QR Code & Ready Events
+client.on('qr', (qr) => {
+    console.log('--- SCAN THE QR CODE BELOW ---');
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('ready', () => {
+    console.log('✅ SYSTEM ONLINE: Monitoring Messages, Media, and Calls...');
+});
+
+// 5. CALL HISTORY
+client.on('incoming_call', async (call) => {
+    try {
+        if (isIgnored(null, call.from)) return;
+
+        const contactId = call.from;
+        const paths = getPaths(contactId.split('@')[0]);
+        
+        const time = new Date().toLocaleString();
+        const direction = call.fromMe ? "OUTGOING" : "INCOMING";
+        const type = call.isVideo ? "VIDEO" : "VOICE";
+        
+        const log = `[${time}] ${direction} ${type} CALL | ID: ${call.id}\n`;
+        fs.appendFileSync(path.join(paths.calls, 'call_history.txt'), log);
+        console.log(`📞 Logged ${direction} call for: ${contactId}`);
+    } catch (err) {
+        console.error("Call Log Error:", err.message);
+    }
+});
+
+// 6. MESSAGES & MEDIA (Sent & Received)
 client.on('message_create', async (msg) => {
     try {
         const chat = await msg.getChat();
         const contact = await msg.getContact();
         
+        // 🛠️ FIX: Strict Group ID Check (@g.us)
+        const isActuallyGroup = chat.isGroup && chat.id._serialized.endsWith('@g.us');
+        
+        const chatName = chat.name || "Unknown";
+        const chatId = chat.id._serialized;
+        const personName = contact.name || contact.pushname || contact.number;
+
+        // 🛑 Skip if Ignored
+        if (isIgnored(chatName, chatId)) return;
+
         let paths;
         let senderLabel;
 
-        if (chat.isGroup) {
-            const groupName = chat.name || "Unknown Group";
-            // If message is from me, name the subfolder "Sent by Me"
-            senderLabel = msg.fromMe ? "Sent by Me" : (contact.name || contact.pushname || contact.number);
-            paths = getPaths(groupName, senderLabel, true);
+        if (isActuallyGroup) {
+            senderLabel = msg.fromMe ? "Sent by Me" : personName;
+            paths = getPaths(chatName, senderLabel, true);
         } else {
-            // Private Chat logic
-            const targetId = msg.fromMe ? msg.to : msg.from;
-            const personName = contact.name || contact.number || targetId;
-            paths = getPaths(personName);
+            const folderOwner = msg.fromMe ? (chatName || contact.number) : personName;
+            paths = getPaths(folderOwner);
             senderLabel = msg.fromMe ? "ME" : "THEM";
         }
 
@@ -84,7 +128,7 @@ client.on('message_create', async (msg) => {
             }
         }
         
-        console.log(`✅ Saved ${senderLabel} data in ${chat.name || "Chat"}`);
+        console.log(`✅ Saved ${senderLabel} data in: ${chatName}`);
     } catch (err) {
         console.error("Error:", err.message);
     }
