@@ -27,15 +27,15 @@ A powerful, automated Node.js tool to backup your WhatsApp chats, media, and cal
 ### Installation
 1. Clone the Repository:
    
-   > git clone [https://github.com/Aman-kumarx1/WaChats.git]
+       git clone https://github.com/Aman-kumarx1/WaChats.git
    
-   > cd WaChats
+       cd WaChats
    
 2. Install Dependencies:
    
-   > npm install
+       npm install
    
-   > node app.js
+       node app.js
 
 3. Link Device:
    
@@ -45,5 +45,12 @@ A powerful, automated Node.js tool to backup your WhatsApp chats, media, and cal
    
    Scan the terminal QR code.
 
+4. Ignore list
 
+   Fill the details of the contact 
 
+   Example:
+   
+       Aman
+   
+       1234567890
