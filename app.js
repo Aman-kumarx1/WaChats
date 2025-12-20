@@ -4,18 +4,18 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// 1. Detect Environment
+/** @type {any} */
 const isAndroid = os.platform() === 'android';
 
-// Create base options
+/** @type {any} */
 const puppeteerOpts = {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
 };
 
-// Add executable path only if on Android
 if (isAndroid) {
-    puppeteerOpts['executablePath'] = '/usr/bin/chromium-browser';
+    // @ts-ignore
+    puppeteerOpts.executablePath = '/usr/bin/chromium-browser';
 }
 
 const client = new Client({
@@ -23,7 +23,9 @@ const client = new Client({
     puppeteer: puppeteerOpts
 });
 
-// 2. Ignore List Logic
+/** * @param {string | null} name 
+ * @param {string} id 
+ */
 const isIgnored = (name, id) => {
     try {
         if (!fs.existsSync('ignore.txt')) return false;
@@ -36,20 +38,28 @@ const isIgnored = (name, id) => {
     } catch (err) { return false; }
 };
 
-// 3. Folder Path Logic
-const cleanFolderName = (name) => name.replace(/[<>:"/\\|?*]/g, "").trim();
-
+/** * @param {string} chatName 
+ * @param {string} [participantName] 
+ * @param {boolean} [isGroup] 
+ */
 const getPaths = (chatName, participantName, isGroup) => {
+    const cleanFolderName = (/** @type {string} */ n) => n.replace(/[<>:"/\\|?*]/g, "").trim();
     const chatFolder = cleanFolderName(chatName);
     let baseDir = path.join(__dirname, 'Backups', chatFolder);
-    if (isGroup) baseDir = path.join(baseDir, cleanFolderName(participantName));
+    
+    if (isGroup && participantName) {
+        baseDir = path.join(baseDir, cleanFolderName(participantName));
+    }
 
     const paths = {
         messages: path.join(baseDir, 'messages'),
         media: path.join(baseDir, 'media'),
         calls: path.join(baseDir, 'calls')
     };
-    Object.values(paths).forEach(dir => { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); });
+
+    Object.values(paths).forEach(dir => { 
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); 
+    });
     return paths;
 };
 
@@ -73,7 +83,7 @@ client.on('message_create', async (msg) => {
 
         let paths;
         let senderLabel;
-        const personName = contact.name || contact.pushname || contact.number;
+        const personName = contact.name || contact.pushname || contact.number || "Unknown";
 
         if (isActuallyGroup) {
             senderLabel = msg.fromMe ? "Sent by Me" : personName;
@@ -91,11 +101,14 @@ client.on('message_create', async (msg) => {
             const media = await msg.downloadMedia();
             if (media) {
                 const ext = media.mimetype.split('/')[1].split(';')[0];
-                const filename = `${Date.now()}_${cleanFolderName(senderLabel)}.${ext}`;
+                const filename = `${Date.now()}_${senderLabel}.${ext}`;
                 fs.writeFileSync(path.join(paths.media, filename), media.data, { encoding: 'base64' });
             }
         }
-    } catch (err) { console.error("Error:", err.message); }
+    } catch (err) { 
+        // @ts-ignore
+        console.error("Error:", err.message); 
+    }
 });
 
 client.initialize();
