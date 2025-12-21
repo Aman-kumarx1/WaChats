@@ -3,11 +3,10 @@ const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const cliProgress = require('cli-progress');
 
-/** @type {any} */
+// Detect Environment
 const isAndroid = os.platform() === 'android';
-
-/** @type {any} */
 const puppeteerOpts = {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
@@ -23,27 +22,24 @@ const client = new Client({
     puppeteer: puppeteerOpts
 });
 
-/** * @param {string | null} name 
- * @param {string} id 
- */
+const SYNC_TRACKER_PATH = path.join(__dirname, 'sync_history.json');
+
+// --- Helper Functions ---
+
 const isIgnored = (name, id) => {
     try {
         if (!fs.existsSync('ignore.txt')) return false;
         const ignoredList = fs.readFileSync('ignore.txt', 'utf8')
             .split('\n').map(line => line.trim()).filter(line => line.length > 0);
-        const cleanId = id.split('@')[0]; 
+        const cleanId = id.split('@')[0];
         return ignoredList.some(item => 
             (name && name.toLowerCase() === item.toLowerCase()) || (cleanId === item)
         );
     } catch (err) { return false; }
 };
 
-/** * @param {string} chatName 
- * @param {string} [participantName] 
- * @param {boolean} [isGroup] 
- */
 const getPaths = (chatName, participantName, isGroup) => {
-    const cleanFolderName = (/** @type {string} */ n) => n.replace(/[<>:"/\\|?*]/g, "").trim();
+    const cleanFolderName = (n) => n.replace(/[<>:"/\\|?*]/g, "").trim();
     const chatFolder = cleanFolderName(chatName);
     let baseDir = path.join(__dirname, 'Backups', chatFolder);
     
@@ -63,22 +59,27 @@ const getPaths = (chatName, participantName, isGroup) => {
     return paths;
 };
 
-client.on('qr', (qr) => {
-    console.log('--- SCAN THE QR CODE BELOW ---');
-    qrcode.generate(qr, { small: true });
-});
+// --- Sync & Persistence Logic ---
 
-client.on('ready', () => {
-    console.log(`✅ ONLINE (${isAndroid ? 'Termux' : 'PC'}): Saving Data...`);
-});
+const getSyncData = () => {
+    if (fs.existsSync(SYNC_TRACKER_PATH)) {
+        return JSON.parse(fs.readFileSync(SYNC_TRACKER_PATH, 'utf8'));
+    }
+    return {};
+};
 
-client.on('message_create', async (msg) => {
+const saveSyncTimestamp = (chatId, timestamp) => {
+    const data = getSyncData();
+    data[chatId] = timestamp;
+    fs.writeFileSync(SYNC_TRACKER_PATH, JSON.stringify(data, null, 2));
+};
+
+const saveMessageToLocal = async (msg, chat) => {
     try {
-        const chat = await msg.getChat();
         const contact = await msg.getContact();
         const isActuallyGroup = chat.isGroup && chat.id._serialized.endsWith('@g.us');
-        
         const chatName = chat.name || "Unknown";
+        
         if (isIgnored(chatName, chat.id._serialized)) return;
 
         let paths;
@@ -94,21 +95,78 @@ client.on('message_create', async (msg) => {
             senderLabel = msg.fromMe ? "ME" : "THEM";
         }
 
-        const time = new Date().toLocaleString();
+        const time = new Date(msg.timestamp * 1000).toLocaleString();
         fs.appendFileSync(path.join(paths.messages, 'chat_history.txt'), `[${time}] ${senderLabel}: ${msg.body}\n`);
-        
+
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();
             if (media) {
                 const ext = media.mimetype.split('/')[1].split(';')[0];
-                const filename = `${Date.now()}_${senderLabel}.${ext}`;
-                fs.writeFileSync(path.join(paths.media, filename), media.data, { encoding: 'base64' });
+                const filename = `${msg.timestamp}_${senderLabel}.${ext}`;
+                const fullPath = path.join(paths.media, filename);
+                if (!fs.existsSync(fullPath)) {
+                    fs.writeFileSync(fullPath, media.data, { encoding: 'base64' });
+                }
             }
         }
-    } catch (err) { 
-        // @ts-ignore
-        console.error("Error:", err.message); 
+    } catch (err) {
+        // Silently skip if media download fails during bulk sync
     }
+};
+
+// --- Events ---
+
+client.on('qr', (qr) => {
+    console.log('--- SCAN THE QR CODE BELOW ---');
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('ready', async () => {
+    console.log(`✅ ONLINE (${isAndroid ? 'Termux' : 'PC'})`);
+    console.log(`🚀 Starting History Sync...`);
+
+    const chats = await client.getChats();
+    const syncData = getSyncData();
+    
+    // Initialize Progress Bar
+    const multibar = new cliProgress.MultiBar({
+        clearOnComplete: false,
+        hideCursor: true,
+        format: '{bar} | {percentage}% | {chatName}'
+    }, cliProgress.Presets.shades_grey);
+
+    for (const chat of chats) {
+        if (isIgnored(chat.name, chat.id._serialized)) continue;
+
+        const lastSync = syncData[chat.id._serialized];
+        let messages = await chat.fetchMessages({ limit: 100 });
+        
+        // Filter messages if we have a last sync timestamp
+        if (lastSync) {
+            messages = messages.filter(m => m.timestamp > lastSync);
+        }
+
+        if (messages.length > 0) {
+            const bar = multibar.create(messages.length, 0, { chatName: chat.name || 'Unknown' });
+            
+            for (const msg of messages) {
+                await saveMessageToLocal(msg, chat);
+                bar.increment();
+            }
+            
+            const latestTimestamp = messages[messages.length - 1].timestamp;
+            saveSyncTimestamp(chat.id._serialized, latestTimestamp);
+        }
+    }
+
+    multibar.stop();
+    console.log("🏁 All chats up to date. Live monitoring active.");
+});
+
+client.on('message_create', async (msg) => {
+    const chat = await msg.getChat();
+    await saveMessageToLocal(msg, chat);
+    saveSyncTimestamp(chat.id._serialized, msg.timestamp);
 });
 
 client.initialize();
