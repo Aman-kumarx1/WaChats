@@ -107,7 +107,7 @@ const saveMessageToLocal = async (msg, chat) => {
                 }
             }
         }
-    } catch (err) { /* Silently skip media errors during bulk sync */ }
+    } catch (err) { /* Silently skip media errors during sync */ }
 };
 
 // 4. Events
@@ -118,17 +118,33 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
     console.log(`✅ ONLINE (${isAndroid ? 'Termux' : 'PC'})`);
-    
-    // Fix: Wait 5 seconds for WhatsApp Web internal state to stabilize
-    console.log("⏳ Stabilizing connection...");
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    console.log("⏳ Stabilizing connection (10s delay)...");
+    await new Promise(resolve => setTimeout(resolve, 10000));
 
-    console.log(`🚀 Starting History Sync...`);
+    let chats = [];
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    // Retry Loop for fetching chats
+    while (attempts < maxAttempts) {
+        try {
+            console.log(`🚀 Starting History Sync (Attempt ${attempts + 1}/${maxAttempts})...`);
+            chats = await client.getChats();
+            break; 
+        } catch (err) {
+            attempts++;
+            console.error(`⚠️ Attempt ${attempts} failed: ${err.message}`);
+            if (attempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            } else {
+                console.error("❌ Sync failed. Moving to Live Monitoring.");
+                return;
+            }
+        }
+    }
 
     try {
-        const chats = await client.getChats(); //
         const syncData = getSyncData();
-        
         const multibar = new cliProgress.MultiBar({
             clearOnComplete: false,
             hideCursor: true,
@@ -139,14 +155,17 @@ client.on('ready', async () => {
             if (isIgnored(chat.name, chat.id._serialized)) continue;
 
             const lastSync = syncData[chat.id._serialized];
-            let messages = await chat.fetchMessages({ limit: 100 }); //
+            // Fetch messages; if first time, fetch 100. Else, pull 100 and filter by timestamp
+            let messages = await chat.fetchMessages({ limit: 100 });
             
             if (lastSync) {
                 messages = messages.filter(m => m.timestamp > lastSync);
             }
 
             if (messages.length > 0) {
-                const bar = multibar.create(messages.length, 0, { chatName: (chat.name || 'Chat').slice(0, 15).padEnd(15) });
+                const bar = multibar.create(messages.length, 0, { 
+                    chatName: (chat.name || 'Chat').slice(0, 15).padEnd(15) 
+                });
                 
                 for (const msg of messages) {
                     await saveMessageToLocal(msg, chat);
@@ -162,7 +181,7 @@ client.on('ready', async () => {
         multibar.stop();
         console.log("🏁 History Sync Complete. Live monitoring active.");
     } catch (err) {
-        console.error("❌ Sync Error (Switching to Live Only):", err.message);
+        console.error("❌ processing Error:", err.message);
     }
 });
 
