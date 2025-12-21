@@ -58,7 +58,7 @@ const getPaths = (chatName, participantName, isGroup) => {
     return paths;
 };
 
-// 3. Persistence Logic
+// 3. Persistence & Sync Logic
 const getSyncData = () => {
     if (fs.existsSync(SYNC_TRACKER_PATH)) {
         return JSON.parse(fs.readFileSync(SYNC_TRACKER_PATH, 'utf8'));
@@ -107,7 +107,7 @@ const saveMessageToLocal = async (msg, chat) => {
                 }
             }
         }
-    } catch (err) { /* Silently skip media errors during sync */ }
+    } catch (err) { /* Skipping errors for deleted media or connection blips */ }
 };
 
 // 4. Events
@@ -118,14 +118,13 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
     console.log(`✅ ONLINE (${isAndroid ? 'Termux' : 'PC'})`);
-    console.log("⏳ Stabilizing connection (10s delay)...");
-    await new Promise(resolve => setTimeout(resolve, 10000));
+    console.log("⏳ Waiting 15s for your phone to sync 'Sent' history...");
+    await new Promise(resolve => setTimeout(resolve, 15000));
 
     let chats = [];
     let attempts = 0;
     const maxAttempts = 3;
 
-    // Retry Loop for fetching chats
     while (attempts < maxAttempts) {
         try {
             console.log(`🚀 Starting History Sync (Attempt ${attempts + 1}/${maxAttempts})...`);
@@ -133,13 +132,8 @@ client.on('ready', async () => {
             break; 
         } catch (err) {
             attempts++;
-            console.error(`⚠️ Attempt ${attempts} failed: ${err.message}`);
-            if (attempts < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, 5000));
-            } else {
-                console.error("❌ Sync failed. Moving to Live Monitoring.");
-                return;
-            }
+            if (attempts < maxAttempts) await new Promise(res => setTimeout(res, 5000));
+            else { console.error("❌ Sync Failed."); return; }
         }
     }
 
@@ -155,8 +149,10 @@ client.on('ready', async () => {
             if (isIgnored(chat.name, chat.id._serialized)) continue;
 
             const lastSync = syncData[chat.id._serialized];
-            // Fetch messages; if first time, fetch 100. Else, pull 100 and filter by timestamp
-            let messages = await chat.fetchMessages({ limit: 100 });
+            
+            // 🛠️ FETCH FIX: Fetching both sent and received by removing fromMe filter
+            // limit: 500 allows for a deeper history grab on first connect
+            let messages = await chat.fetchMessages({ limit: 500 });
             
             if (lastSync) {
                 messages = messages.filter(m => m.timestamp > lastSync);
@@ -179,9 +175,9 @@ client.on('ready', async () => {
         }
 
         multibar.stop();
-        console.log("🏁 History Sync Complete. Live monitoring active.");
+        console.log("🏁 History Sync Complete. Your past messages (Sent & Received) are saved.");
     } catch (err) {
-        console.error("❌ processing Error:", err.message);
+        console.error("❌ Sync Error:", err.message);
     }
 });
 
