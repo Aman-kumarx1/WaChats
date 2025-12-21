@@ -5,7 +5,7 @@ const path = require('path');
 const os = require('os');
 const cliProgress = require('cli-progress');
 
-// Detect Environment
+// 1. Detect Environment (Termux vs Windows/PC)
 const isAndroid = os.platform() === 'android';
 const puppeteerOpts = {
     headless: true,
@@ -24,8 +24,7 @@ const client = new Client({
 
 const SYNC_TRACKER_PATH = path.join(__dirname, 'sync_history.json');
 
-// --- Helper Functions ---
-
+// 2. Helper Functions
 const isIgnored = (name, id) => {
     try {
         if (!fs.existsSync('ignore.txt')) return false;
@@ -59,8 +58,7 @@ const getPaths = (chatName, participantName, isGroup) => {
     return paths;
 };
 
-// --- Sync & Persistence Logic ---
-
+// 3. Persistence Logic
 const getSyncData = () => {
     if (fs.existsSync(SYNC_TRACKER_PATH)) {
         return JSON.parse(fs.readFileSync(SYNC_TRACKER_PATH, 'utf8'));
@@ -109,13 +107,10 @@ const saveMessageToLocal = async (msg, chat) => {
                 }
             }
         }
-    } catch (err) {
-        // Silently skip if media download fails during bulk sync
-    }
+    } catch (err) { /* Silently skip media errors during bulk sync */ }
 };
 
-// --- Events ---
-
+// 4. Events
 client.on('qr', (qr) => {
     console.log('--- SCAN THE QR CODE BELOW ---');
     qrcode.generate(qr, { small: true });
@@ -123,44 +118,52 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
     console.log(`✅ ONLINE (${isAndroid ? 'Termux' : 'PC'})`);
+    
+    // Fix: Wait 5 seconds for WhatsApp Web internal state to stabilize
+    console.log("⏳ Stabilizing connection...");
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
     console.log(`🚀 Starting History Sync...`);
 
-    const chats = await client.getChats();
-    const syncData = getSyncData();
-    
-    // Initialize Progress Bar
-    const multibar = new cliProgress.MultiBar({
-        clearOnComplete: false,
-        hideCursor: true,
-        format: '{bar} | {percentage}% | {chatName}'
-    }, cliProgress.Presets.shades_grey);
-
-    for (const chat of chats) {
-        if (isIgnored(chat.name, chat.id._serialized)) continue;
-
-        const lastSync = syncData[chat.id._serialized];
-        let messages = await chat.fetchMessages({ limit: 100 });
+    try {
+        const chats = await client.getChats(); //
+        const syncData = getSyncData();
         
-        // Filter messages if we have a last sync timestamp
-        if (lastSync) {
-            messages = messages.filter(m => m.timestamp > lastSync);
-        }
+        const multibar = new cliProgress.MultiBar({
+            clearOnComplete: false,
+            hideCursor: true,
+            format: '{chatName} | {bar} | {percentage}%'
+        }, cliProgress.Presets.shades_grey);
 
-        if (messages.length > 0) {
-            const bar = multibar.create(messages.length, 0, { chatName: chat.name || 'Unknown' });
+        for (const chat of chats) {
+            if (isIgnored(chat.name, chat.id._serialized)) continue;
+
+            const lastSync = syncData[chat.id._serialized];
+            let messages = await chat.fetchMessages({ limit: 100 }); //
             
-            for (const msg of messages) {
-                await saveMessageToLocal(msg, chat);
-                bar.increment();
+            if (lastSync) {
+                messages = messages.filter(m => m.timestamp > lastSync);
             }
-            
-            const latestTimestamp = messages[messages.length - 1].timestamp;
-            saveSyncTimestamp(chat.id._serialized, latestTimestamp);
-        }
-    }
 
-    multibar.stop();
-    console.log("🏁 All chats up to date. Live monitoring active.");
+            if (messages.length > 0) {
+                const bar = multibar.create(messages.length, 0, { chatName: (chat.name || 'Chat').slice(0, 15).padEnd(15) });
+                
+                for (const msg of messages) {
+                    await saveMessageToLocal(msg, chat);
+                    bar.increment();
+                }
+                
+                const latestTimestamp = messages[messages.length - 1].timestamp;
+                saveSyncTimestamp(chat.id._serialized, latestTimestamp);
+                bar.stop();
+            }
+        }
+
+        multibar.stop();
+        console.log("🏁 History Sync Complete. Live monitoring active.");
+    } catch (err) {
+        console.error("❌ Sync Error (Switching to Live Only):", err.message);
+    }
 });
 
 client.on('message_create', async (msg) => {
