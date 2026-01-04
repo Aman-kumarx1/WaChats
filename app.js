@@ -8,7 +8,6 @@ const ffmpeg = require('fluent-ffmpeg');
 
 // --- 1. CONFIGURATION & SETUP ---
 
-// Detect Environment (Termux vs Windows)
 const isAndroid = os.platform() === 'android';
 const puppeteerOpts = {
     headless: true,
@@ -31,6 +30,7 @@ const SYNC_TRACKER_PATH = path.join(__dirname, 'sync_history.json');
 
 const cleanName = (name) => {
     if (!name) return "Unknown";
+    // Removes special characters like / \ : * ? " < > | to prevent crashes
     return name.replace(/[<>:"/\\|?*]/g, "").trim();
 };
 
@@ -40,6 +40,8 @@ const isIgnored = (name, id) => {
         const ignoredList = fs.readFileSync('ignore.txt', 'utf8')
             .split('\n').map(line => line.trim()).filter(line => line.length > 0);
         const cleanId = id.split('@')[0];
+        
+        // Check if name or number exists in ignore list
         return ignoredList.some(item => 
             (name && name.toLowerCase() === item.toLowerCase()) || (cleanId === item)
         );
@@ -53,7 +55,7 @@ const getPaths = (chatName) => {
     const paths = {
         messages: path.join(baseDir, 'messages'),
         media: path.join(baseDir, 'media'),
-        calls: path.join(baseDir, 'calls') // Placeholder for future use
+        calls: path.join(baseDir, 'calls')
     };
 
     Object.values(paths).forEach(dir => { 
@@ -85,15 +87,12 @@ const formatMessageBody = async (msg) => {
             
             // Preview the quoted text (limit to 50 chars)
             let quotedText = quoted.body || (quoted.hasMedia ? "(Media)" : "(Unknown)");
-            quotedText = quotedText.replace(/\n/g, ' '); // Remove newlines for cleaner text file
+            quotedText = quotedText.replace(/\n/g, ' '); 
             if (quotedText.length > 50) quotedText = quotedText.substring(0, 50) + "...";
 
-            // Format: 
-            // |> Replying to John: "Hello there..."
-            // | Received: I am fine
             body = `\n\t|> Replying to ${quotedName}: "${quotedText}"\n\t| ${body}`;
         } catch (e) {
-            // If fetching quote fails, just return original body
+            // Ignore if quoted msg is missing
         }
     }
 
@@ -107,71 +106,69 @@ const convertAudioToMp3 = (inputPath) => {
             .toFormat('mp3')
             .on('error', (err) => reject(err))
             .on('end', () => {
-                // Delete the original OGG file to save space
-                try { fs.unlinkSync(inputPath); } catch(e){}
+                try { fs.unlinkSync(inputPath); } catch(e){} // Delete .ogg
                 resolve(outputPath);
             })
             .save(outputPath);
     });
 };
 
-// --- 4. MAIN SAVE LOGIC ---
+// --- 4. MAIN SAVE LOGIC (Fixed for Folders & Labels) ---
 
 const saveMessageToLocal = async (msg, chat) => {
     try {
         const contact = await msg.getContact();
-        const isActuallyGroup = chat.isGroup && chat.id._serialized.endsWith('@g.us');
         
-        // 1. Determine Folder Name (Chat Name)
-        const chatFolderName = isActuallyGroup 
-            ? (chat.name || "Unknown Group") 
-            : (contact.name || contact.pushname || contact.number || "Unknown");
+        // [FIX] ALWAYS name the folder based on the Conversation Name (Chat Name)
+        // This ensures Sent and Received messages stay in the SAME folder.
+        let chatFolderName = chat.name || (await chat.getContact()).name || "Unknown";
+        chatFolderName = cleanName(chatFolderName);
 
         if (isIgnored(chatFolderName, chat.id._serialized)) return;
 
         const paths = getPaths(chatFolderName);
-        const personName = contact.name || contact.pushname || contact.number || "Unknown";
 
-        // 2. Determine Sender Label
+        // [FIX] Label Logic: "sent" vs "received"
         let senderLabel;
         if (msg.fromMe) {
-            senderLabel = "Sent";
+            senderLabel = "sent";
         } else {
-            senderLabel = isActuallyGroup ? `Received (${personName})` : "Received";
+            if (chat.isGroup) {
+                // In groups, we need the name to know WHO sent it
+                const senderName = contact.name || contact.pushname || contact.number || "User";
+                senderLabel = `received (${senderName})`;
+            } else {
+                senderLabel = "received";
+            }
         }
 
         const time = new Date(msg.timestamp * 1000).toLocaleString();
         
-        // 3. Process Text Body (handle replies, locations, etc)
+        // Process Text Body
         const finalBody = await formatMessageBody(msg);
 
-        // 4. Save Text to File
-        const logEntry = `[${time}] ${senderLabel}: ${finalBody}\n`;
+        // Format: time : sent : Hiiiii
+        const logEntry = `${time} : ${senderLabel} : ${finalBody}\n`;
         fs.appendFileSync(path.join(paths.messages, 'chat_history.txt'), logEntry);
 
-        // 5. Save Media (with MP3 conversion)
+        // Save Media
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();
             if (media) {
-                // Get extension (default to bin if unknown)
                 let ext = (media.mimetype.split('/')[1] || 'bin').split(';')[0];
-                
-                // WhatsApp audio is usually ogg/opus
                 if (ext === 'x-wav' || ext === 'ogg') ext = 'ogg'; 
 
+                // [FIX] Sanitize senderLabel in filename to prevent crashes
                 const safeLabel = cleanName(senderLabel);
                 const filename = `${msg.timestamp}_${safeLabel}.${ext}`;
                 const fullPath = path.join(paths.media, filename);
 
-                // Only write if file doesn't exist
                 if (!fs.existsSync(fullPath)) {
                     fs.writeFileSync(fullPath, media.data, { encoding: 'base64' });
 
-                    // Convert OGG Voice Notes to MP3
+                    // Convert OGG to MP3
                     if (ext === 'ogg') {
-                        convertAudioToMp3(fullPath).catch(() => {
-                            // If conversion fails (no ffmpeg), just keep the .ogg
-                        });
+                        convertAudioToMp3(fullPath).catch(() => {});
                     }
                 }
             }
@@ -184,8 +181,14 @@ const saveMessageToLocal = async (msg, chat) => {
 // --- 5. SYNC HISTORY HELPERS ---
 
 const getSyncData = () => {
-    if (fs.existsSync(SYNC_TRACKER_PATH)) {
-        return JSON.parse(fs.readFileSync(SYNC_TRACKER_PATH, 'utf8'));
+    try {
+        if (fs.existsSync(SYNC_TRACKER_PATH)) {
+            const content = fs.readFileSync(SYNC_TRACKER_PATH, 'utf8');
+            if (!content.trim()) return {};
+            return JSON.parse(content);
+        }
+    } catch (err) {
+        return {}; 
     }
     return {};
 };
@@ -205,9 +208,9 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
     console.log(`✅ ONLINE (${isAndroid ? 'Termux' : 'PC'})`);
-    console.log("⏳ Initializing...");
+    console.log("⏳ Checking for missed messages...");
     
-    // Allow some time for internal sync
+    // Slight delay to ensure internal sync
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     let chats = [];
@@ -219,44 +222,39 @@ client.on('ready', async () => {
     }
 
     const syncData = getSyncData();
-    const multibar = new cliProgress.MultiBar({
-        clearOnComplete: false,
-        hideCursor: true,
-        format: '{chatName} | {bar} | {percentage}%'
-    }, cliProgress.Presets.shades_grey);
+    let pendingUpdates = [];
 
-    console.log(`📥 Syncing History for ${chats.length} chats...`);
-
+    // --- SMART SYNC LOGIC ---
     for (const chat of chats) {
-        const name = chat.name || 'Unknown';
-        if (isIgnored(name, chat.id._serialized)) continue;
-
         const lastSync = syncData[chat.id._serialized];
-        
-        // Fetch 50 messages to start. Increase this number if you want more history.
-        let messages = await chat.fetchMessages({ limit: 50 });
 
         if (lastSync) {
+            // [CASE A] We have run this before. 
+            // Fetch messages specifically to fill the gap (Catch-up).
+            // Fetching 100 ensures we cover most downtime gaps.
+            let messages = await chat.fetchMessages({ limit: 100 });
+            
+            // Only keep messages OLDER than now but NEWER than last disconnect
             messages = messages.filter(m => m.timestamp > lastSync);
-        }
 
-        if (messages.length > 0) {
-            const bar = multibar.create(messages.length, 0, { 
-                chatName: name.slice(0, 15).padEnd(15) 
-            });
-            
-            for (const msg of messages) {
-                await saveMessageToLocal(msg, chat);
-                bar.increment();
+            if (messages.length > 0) {
+                console.log(`📥 Catching up ${messages.length} messages for: ${chat.name}`);
+                for (const msg of messages) {
+                    await saveMessageToLocal(msg, chat);
+                }
+                const latestTimestamp = messages[messages.length - 1].timestamp;
+                saveSyncTimestamp(chat.id._serialized, latestTimestamp);
             }
-            
-            const latestTimestamp = messages[messages.length - 1].timestamp;
-            saveSyncTimestamp(chat.id._serialized, latestTimestamp);
-            bar.stop();
+        } else {
+            // [CASE B] First time seeing this chat (or First Run ever).
+            // Do NOT download history. Just mark "Now" as the start point.
+            // This prevents downloading thousands of old messages.
+            const nowTimestamp = Math.floor(Date.now() / 1000);
+            saveSyncTimestamp(chat.id._serialized, nowTimestamp);
         }
     }
-    multibar.stop();
-    console.log("🏁 Sync Complete. Listening for new messages...");
+    
+    console.log("🏁 Ready. Listening for new messages...");
 });
 
 // Real-time message listener
